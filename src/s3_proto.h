@@ -35,7 +35,7 @@ class s3_proto : public std::enable_shared_from_this<s3_proto>
   std::string key;
   uint64_t file_size{0};
   const int k_block_size{1024*1024*8};
-  const int k_max_cached_blocks{4};
+  const int k_max_cached_blocks{6};
   const int k_close_to_edge{1024*1024*2};
   std::mutex mtx;
   std::map<uint64_t, std::shared_ptr<block>> blocks;

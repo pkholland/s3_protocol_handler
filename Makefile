@@ -7,7 +7,7 @@ clean:
 
 obj/libs3_proto.so: src/s3_proto.cpp src/s3_proto.h
 	mkdir -p obj
-	c++ -O2 -shared -fPIC src/s3_proto.cpp -laws-cpp-sdk-s3 -laws-crt-cpp -laws-cpp-sdk-core -lcurl -o obj/libs3_proto.so
+	c++ -O0 -g -shared -fPIC src/s3_proto.cpp -laws-cpp-sdk-s3 -laws-crt-cpp -laws-cpp-sdk-core -lcurl -o obj/libs3_proto.so
 
 all: obj/libs3_proto.so
 

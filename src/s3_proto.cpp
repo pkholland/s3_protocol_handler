@@ -13,6 +13,12 @@
 #include <aws/core/client/RetryStrategy.h>
 #include <fcntl.h>
 
+// copied fromm ffmpeg sources
+#define MKTAG(a,b,c,d)   ((a) | ((b) << 8) | ((c) << 16) | ((unsigned)(d) << 24))
+#define FFERRTAG(a, b, c, d) (-(int)MKTAG(a, b, c, d))
+#define AVERROR_EOF                FFERRTAG( 'E','O','F',' ') ///< End of file
+
+
 using namespace Aws::S3::Model;
 
 namespace
@@ -99,19 +105,14 @@ s3_proto::~s3_proto()
 std::shared_ptr<s3_proto::block> s3_proto::find_block(uint64_t pos, const std::unique_lock<std::mutex>&)
 {
   if (!blocks.empty()) {
-    auto block_it = blocks.upper_bound(pos);
-    // block_it is pointing to the first block in our cache whose first byte is
-    // strictly greater than 'pos' - or it is 'end' if there are no such
-    // blocks.
-    if (block_it != blocks.begin()) {
-      // if block_it isn't 'begin', then back it up one block.  If block_it
-      // was 'end' then it becomes 'last'.  This is the only block in the
-      // cache that has any possiblity of including the byte at 'pos'
-      block_it = std::prev(block_it);
-      auto end_pos = block_it->first + block_it->second->data.size();
-      if (end_pos > pos) {
-        return block_it->second;
-      }
+    auto block_it = blocks.lower_bound(pos);
+    if (block_it != blocks.end() && block_it->first == pos) {
+      return block_it->second;
+    }
+    block_it = std::prev(block_it);
+    auto end_pos = block_it->first + block_it->second->data.size();
+    if (end_pos > pos) {
+      return block_it->second;
     }
   }
   return {};
@@ -124,6 +125,9 @@ void s3_proto::issue_read(uint64_t block_start, const std::unique_lock<std::mute
   // release the oldest one.
   while (last_accessed_blocks.size() >= k_max_cached_blocks) {
     auto last = std::prev(last_accessed_blocks.end());
+    if (!(*last)->read_complete) {
+      break;
+    }
     auto b_it = blocks.find((*last)->block_offset);
     if (b_it != blocks.end()) {
       blocks.erase(b_it);
@@ -429,6 +433,10 @@ int s3_proto::read(void *buf, int sz)
     }
 
     return copy_sz;
+  }
+
+  if (file_pos >= file_size) {
+    return AVERROR_EOF;
   }
 
   // here we don't already have a cached block for this byte, so start
