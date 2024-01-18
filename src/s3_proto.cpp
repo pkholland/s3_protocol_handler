@@ -277,7 +277,7 @@ int s3_proto::finialize_write()
     if (file_size > 0) {
       auto it = blocks.begin();
       auto &data = it->second->data;
-      strm = std::make_shared<Aws::StringStream>(std::string(&data[0], data.size()));
+      strm = std::make_shared<Aws::StringStream>(std::string(&data[0], file_size));
     }
     else {
       strm = std::make_shared<Aws::StringStream>("");
