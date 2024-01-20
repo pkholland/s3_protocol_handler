@@ -9,6 +9,7 @@
 #include <aws/s3/model/UploadPartRequest.h>
 #include <aws/s3/model/CompleteMultipartUploadRequest.h>
 #include <aws/s3/model/CompletedMultipartUpload.h>
+#include <aws/s3/model/GetBucketLocationRequest.h>
 #include <aws/core/utils/threading/Executor.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <fcntl.h>
@@ -27,9 +28,18 @@ namespace
   std::mutex global_mtx;
   std::map<s3_proto*, std::shared_ptr<s3_proto>> instances;
   Aws::SDKOptions options;
-  std::shared_ptr<Aws::S3::S3Client> s3_client;
+  std::shared_ptr<Aws::S3::S3Client> global_s3_client;
+  std::shared_ptr<Aws::Utils::Threading::PooledThreadExecutor> global_thread_pool;
 
-  // class that makes sure we have a valid s3_client
+  std::shared_ptr<Aws::S3::S3Client> regional_s3_client(const std::string& region)
+  {
+    Aws::S3::S3ClientConfiguration  config;
+    config.executor = global_thread_pool;
+    config.region = region;
+    return std::make_shared<Aws::S3::S3Client>(config);
+  }
+
+  // class that makes sure we have a valid global_s3_client
   // whenever there are one or more instances of s3_proto
   class aws_initer
   {
@@ -40,10 +50,11 @@ namespace
       {
         //options.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Info;
         Aws::InitAPI(options);
+        global_thread_pool = std::make_shared<Aws::Utils::Threading::PooledThreadExecutor>(6);
         Aws::S3::S3ClientConfiguration  config;
-        config.executor = std::make_shared<Aws::Utils::Threading::PooledThreadExecutor>(6);
+        config.executor = global_thread_pool;
         //config.retryStrategy = std::make_shared<Aws::Client::StandardRetryStrategy>(10);
-        s3_client = std::make_shared<Aws::S3::S3Client>(config);
+        global_s3_client = std::make_shared<Aws::S3::S3Client>(config);
       }
     }
 
@@ -51,7 +62,8 @@ namespace
     {
       if (instances.empty())
       {
-        s3_client.reset();
+        global_s3_client.reset();
+        global_thread_pool.reset();
         Aws::ShutdownAPI(options);
       }
     }
@@ -60,6 +72,7 @@ namespace
 }
 
 s3_proto::s3_proto(const std::string &url, int access)
+  : s3_client(global_s3_client)
 {
   if (url.find("s3://") != 0) {
     throw std::runtime_error("invalid url");
@@ -73,6 +86,34 @@ s3_proto::s3_proto(const std::string &url, int access)
   key = path.substr(first_slash_pos + 1);
   if (key.empty()) {
     throw std::runtime_error("invalid url");
+  }
+
+  // while the sdk supports behaviors to automatically redirect
+  // s3 read/write to the correct region, it does so by following
+  // http redirects on each call.  Since we will be making multiple
+  // calls to these buckets we would rather find the right region
+  // once and reset our client, if necessary, to the region corresponding
+  // to the bucket.
+  GetBucketLocationRequest blReq;
+  blReq.WithBucket(bucket);
+  auto reply = s3_client->GetBucketLocation(blReq);
+  if (!reply.IsSuccess()) {
+    auto &err = reply.GetError();
+    if (err.GetResponseCode() == Aws::Http::HttpResponseCode::MOVED_PERMANENTLY) {
+      auto &headers = err.GetResponseHeaders();
+      auto it = headers.find("x-amz-bucket-region");
+      if (it != headers.end()) {
+        s3_client = regional_s3_client(it->second);
+      }
+    }
+  }
+  else {
+    auto &result = reply.GetResult();
+    auto loc = result.GetLocationConstraint();
+    if (loc != Aws::S3::Model::BucketLocationConstraint::NOT_SET) {
+      auto region = Aws::S3::Model::BucketLocationConstraintMapper::GetNameForBucketLocationConstraint(loc);
+      s3_client = regional_s3_client(region);
+    }
   }
 
   if (!(access & O_CREAT)) {
@@ -109,10 +150,12 @@ std::shared_ptr<s3_proto::block> s3_proto::find_block(uint64_t pos, const std::u
     if (block_it != blocks.end() && block_it->first == pos) {
       return block_it->second;
     }
-    block_it = std::prev(block_it);
-    auto end_pos = block_it->first + block_it->second->data.size();
-    if (end_pos > pos) {
-      return block_it->second;
+    if (block_it != blocks.begin()) {
+      auto prev_block_it = std::prev(block_it);
+      auto end_pos = prev_block_it->first + prev_block_it->second->data.size();
+      if (end_pos > pos) {
+        return prev_block_it->second;
+      }
     }
   }
   return {};
@@ -123,7 +166,7 @@ void s3_proto::issue_read(uint64_t block_start, const std::unique_lock<std::mute
 {
   // if we already have the maximum number of blocks cached
   // release the oldest one.
-  while (last_accessed_blocks.size() >= k_max_cached_blocks) {
+  while (last_accessed_blocks.size() >= k_max_cached_read_blocks) {
     auto last = std::prev(last_accessed_blocks.end());
     if (!(*last)->read_complete) {
       break;
@@ -137,7 +180,7 @@ void s3_proto::issue_read(uint64_t block_start, const std::unique_lock<std::mute
 
   // allocate the memory for the block we are going to read
   // and link it to the lists we use to track things.
-  auto block_end = block_start + k_block_size;
+  auto block_end = block_start + k_read_block_size;
   if (block_end > file_size) {
     block_end = file_size;
   }
@@ -182,7 +225,7 @@ void s3_proto::issue_read(uint64_t block_start, const std::unique_lock<std::mute
 // upload one multipart block
 void s3_proto::write_one_block(const std::shared_ptr<block>& b)
 {
-  auto part_num = 1 + (b->block_offset / k_block_size);
+  auto part_num = 1 + (b->block_offset / k_write_block_size);
   auto &data = b->data;
   UploadPartRequest req;
   req.WithBucket(bucket)
@@ -215,7 +258,7 @@ void s3_proto::write_one_block(const std::shared_ptr<block>& b)
 // behind file_pos
 void s3_proto::flush_completed_blocks(const std::unique_lock<std::mutex>&)
 {
-  if (file_size < k_block_size) {
+  if (file_size < k_write_block_size) {
     return;
   }
 
@@ -322,7 +365,7 @@ int s3_proto::finialize_write()
     for (auto cp : completed_parts) {
       while (cp.first > part_num) {
         wrote_some = true;
-        write_one_block(std::make_shared<block>((part_num-1)*k_block_size, k_block_size));
+        write_one_block(std::make_shared<block>((part_num-1)*k_write_block_size, k_write_block_size));
         ++part_num;
       }
       ++part_num;
@@ -426,9 +469,9 @@ int s3_proto::read(void *buf, int sz)
     // then these two prefetch calls tend to only acutally prefetch
     // one of the two.
     if (block_start > 0 && (orig_file_pos - block_start < k_close_to_edge)) {
-      auto prev_it= blocks.find(block_start - k_block_size);
+      auto prev_it= blocks.find(block_start - k_read_block_size);
       if (prev_it == blocks.end()) {
-        issue_read(block_start - k_block_size, l);
+        issue_read(block_start - k_read_block_size, l);
       } 
     }
 
@@ -441,7 +484,7 @@ int s3_proto::read(void *buf, int sz)
 
   // here we don't already have a cached block for this byte, so start
   // a new fetch for that block.
-  auto block_start = file_pos / k_block_size * k_block_size;
+  auto block_start = file_pos / k_read_block_size * k_read_block_size;
   issue_read(block_start, l);
   l.unlock();
   return read(buf, sz);
@@ -468,8 +511,8 @@ int s3_proto::write(const void *buf, int sz)
     return (int)copy_sz;
   }
 
-  auto block_start = file_pos / k_block_size * k_block_size;
-  auto b = std::make_shared<block>(block_start, k_block_size);
+  auto block_start = file_pos / k_write_block_size * k_write_block_size;
+  auto b = std::make_shared<block>(block_start, k_write_block_size);
   blocks.emplace(block_start, b);
   l.unlock();
   return write(buf, sz);
