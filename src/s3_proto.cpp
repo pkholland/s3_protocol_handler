@@ -99,10 +99,12 @@ s3_proto::s3_proto(const std::string &url, int access)
   auto reply = s3_client->GetBucketLocation(blReq);
   if (!reply.IsSuccess()) {
     auto &err = reply.GetError();
+    std::cerr << "GetBucketLocation(" << bucket << ") failed\n" << err << "\n";
     if (err.GetResponseCode() == Aws::Http::HttpResponseCode::MOVED_PERMANENTLY) {
       auto &headers = err.GetResponseHeaders();
       auto it = headers.find("x-amz-bucket-region");
       if (it != headers.end()) {
+        std::cerr << "reset s3_client to " << it->second << " via MOVED_PERMANENTLY error\n";
         s3_client = regional_s3_client(it->second);
       }
     }
@@ -112,6 +114,7 @@ s3_proto::s3_proto(const std::string &url, int access)
     auto loc = result.GetLocationConstraint();
     if (loc != Aws::S3::Model::BucketLocationConstraint::NOT_SET) {
       auto region = Aws::S3::Model::BucketLocationConstraintMapper::GetNameForBucketLocationConstraint(loc);
+      std::cerr << "reset s3_client to " << region << " via GetBucketLocation succeeding\n";
       s3_client = regional_s3_client(region);
     }
   }
