@@ -106,7 +106,8 @@ s3_proto::s3_proto(const std::string &url, int access)
   if (!reply.IsSuccess()) {
     auto &err = reply.GetError();
     std::cerr << "HeadBucket(" << bucket << ") failed\n" << err << "\n";
-    if (err.GetResponseCode() == Aws::Http::HttpResponseCode::MOVED_PERMANENTLY) {
+    if ((err.GetResponseCode() == Aws::Http::HttpResponseCode::MOVED_PERMANENTLY)
+      || (err.GetResponseCode() == Aws::Http::HttpResponseCode::FORBIDDEN)) {
       auto &headers = err.GetResponseHeaders();
       auto it = headers.find("x-amz-bucket-region");
       if (it != headers.end()) {
