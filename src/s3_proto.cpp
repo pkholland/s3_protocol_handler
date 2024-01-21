@@ -9,7 +9,7 @@
 #include <aws/s3/model/UploadPartRequest.h>
 #include <aws/s3/model/CompleteMultipartUploadRequest.h>
 #include <aws/s3/model/CompletedMultipartUpload.h>
-#include <aws/s3/model/GetBucketLocationRequest.h>
+#include <aws/s3/model/HeadBucketRequest.h>
 #include <aws/core/utils/threading/Executor.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <fcntl.h>
@@ -94,12 +94,18 @@ s3_proto::s3_proto(const std::string &url, int access)
   // calls to these buckets we would rather find the right region
   // once and reset our client, if necessary, to the region corresponding
   // to the bucket.
-  GetBucketLocationRequest blReq;
-  blReq.WithBucket(bucket);
-  auto reply = s3_client->GetBucketLocation(blReq);
+  // https://github.com/aws/aws-sdk-go/issues/720 has a discussion with
+  // comments from aws engineers claiming that "HeadBucket" is the ideal
+  // call to make in this kind of usage.  Note that usually when the
+  // given s3 url is for a bucket outside of the region where this code
+  // is running in, s3 returns a 301 response, so we take the first
+  // branch and find the right region in the headers that are returned.
+  HeadBucketRequest hbReq;
+  hbReq.WithBucket(bucket);
+  auto reply = s3_client->HeadBucket(hbReq);
   if (!reply.IsSuccess()) {
     auto &err = reply.GetError();
-    std::cerr << "GetBucketLocation(" << bucket << ") failed\n" << err << "\n";
+    std::cerr << "HeadBucket(" << bucket << ") failed\n" << err << "\n";
     if (err.GetResponseCode() == Aws::Http::HttpResponseCode::MOVED_PERMANENTLY) {
       auto &headers = err.GetResponseHeaders();
       auto it = headers.find("x-amz-bucket-region");
@@ -111,12 +117,9 @@ s3_proto::s3_proto(const std::string &url, int access)
   }
   else {
     auto &result = reply.GetResult();
-    auto loc = result.GetLocationConstraint();
-    if (loc != Aws::S3::Model::BucketLocationConstraint::NOT_SET) {
-      auto region = Aws::S3::Model::BucketLocationConstraintMapper::GetNameForBucketLocationConstraint(loc);
-      std::cerr << "reset s3_client to " << region << " via GetBucketLocation succeeding\n";
-      s3_client = regional_s3_client(region);
-    }
+    auto region = result.GetBucketRegion();
+    std::cerr << "reset s3_client to " << region << " via HeadBucket succeeding\n";
+    s3_client = regional_s3_client(region);
   }
 
   if (!(access & O_CREAT)) {
