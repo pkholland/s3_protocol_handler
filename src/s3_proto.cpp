@@ -105,13 +105,11 @@ s3_proto::s3_proto(const std::string &url, int access)
   auto reply = s3_client->HeadBucket(hbReq);
   if (!reply.IsSuccess()) {
     auto &err = reply.GetError();
-    std::cerr << "HeadBucket(" << bucket << ") failed\n" << err << "\n";
     if ((err.GetResponseCode() == Aws::Http::HttpResponseCode::MOVED_PERMANENTLY)
       || (err.GetResponseCode() == Aws::Http::HttpResponseCode::FORBIDDEN)) {
       auto &headers = err.GetResponseHeaders();
       auto it = headers.find("x-amz-bucket-region");
       if (it != headers.end()) {
-        std::cerr << "reset s3_client to " << it->second << " via MOVED_PERMANENTLY error\n";
         s3_client = regional_s3_client(it->second);
       }
     }
@@ -119,7 +117,6 @@ s3_proto::s3_proto(const std::string &url, int access)
   else {
     auto &result = reply.GetResult();
     auto region = result.GetBucketRegion();
-    std::cerr << "reset s3_client to " << region << " via HeadBucket succeeding\n";
     s3_client = regional_s3_client(region);
   }
 
